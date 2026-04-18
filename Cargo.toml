@@ -7,11 +7,20 @@ edition = "2021"
 
 [dependencies]
 actix-web = "*"
+actix-cors = "*"
+actix-ratelimit = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 reqwest = { version = "*", features = ["json"] }
 tokio = "*"
 dotenv = "*"
+tracing = "*"
+tracing-actix-web = "*"
+tracing-subscriber = "*"
+redis = "*"
+utoipa = "*"
+utoipa-swagger-ui = { version = "*", features = ["actix-web"] }
+utoipa-redoc = "*"
 
 [dev-dependencies]
 actix-rt = "*"
