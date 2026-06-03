@@ -206,6 +206,181 @@ pub fn build_character(
     vec![ChatMessage::system(system), ChatMessage::user(user)]
 }
 
+// ============== 新增动作：翻译 ==============
+
+pub fn build_translate(
+    novel: &Novel,
+    chapter: &Chapter,
+    characters: &[Character],
+    target_language: &str,
+    source_language: Option<&str>,
+    preserve_style: bool,
+) -> Vec<ChatMessage> {
+    let src = source_language
+        .map(|s| format!("（源语言：{}）", s))
+        .unwrap_or_default();
+    let style_guard = if preserve_style {
+        "务必保留原作的：叙事节奏、修辞、口吻、对话风格；译文应让读者察觉不到'这是译作'。"
+    } else {
+        "以自然、地道为目标，不必逐字对照。"
+    };
+    let system = format!(
+        "你是小说《{}》的文学译者。类型={}，风格={}，基调={}。\n\
+         将用户提供的章节正文翻译为{}。\n\
+         {}\n\
+         直接输出译文正文，不要任何前缀、说明、注释。",
+        novel.title,
+        non_blank(&novel.genre, "通用"),
+        non_blank(&novel.style, "通用"),
+        non_blank(&novel.tone, "平稳"),
+        target_language,
+        style_guard,
+    );
+
+    let mut ctx_parts: Vec<String> = Vec::new();
+    ctx_parts.push(format!("【目标语言】\n{}{}", target_language, src));
+    if !characters.is_empty() {
+        let list: Vec<String> = characters
+            .iter()
+            .map(|c| {
+                format!(
+                    "- {}（{}）：{}",
+                    c.name,
+                    non_blank(&c.role, "角色"),
+                    non_blank(&c.description, "")
+                )
+            })
+            .collect();
+        ctx_parts.push(format!(
+            "【人物名翻译参考】\n保持人名、地名、术语与下文一致：\n{}",
+            list.join("\n")
+        ));
+    }
+
+    let user = format!(
+        "{}\n\n【章节标题】{}\n\n【原文】\n{}\n\n请翻译并只返回译文。",
+        ctx_parts.join("\n\n"),
+        chapter.title,
+        chapter.content
+    );
+    vec![ChatMessage::system(system), ChatMessage::user(user)]
+}
+
+// ============== 新增动作：润色 ==============
+
+pub fn build_polish(
+    novel: &Novel,
+    chapter: &Chapter,
+    focus: &str,
+) -> Vec<ChatMessage> {
+    let focus_desc = match focus {
+        "dialogue" => "重点润色对话：让台词更贴合人物性格、节奏更自然、潜台词更丰富。",
+        "description" => "重点润色环境与动作描写：用词更精准、画面感更强、避免冗余。",
+        "pacing" => "重点润色节奏：句式长短交错、段落疏密有致、张弛有度。",
+        "grammar" => "重点修正语法、用词、标点等硬伤；保持文风不变。",
+        _ => "全面润色：兼顾语言流畅、节奏、对话、画面感，但保留作者原有的个人风格。",
+    };
+    let system = format!(
+        "你是《{}》的资深文学编辑。类型={}，风格={}，视角={}，基调={}。\n\
+         对章节正文进行润色，提升文字质量。\n\
+         {}\n\
+         只返回润色后的完整正文，不要任何说明、前缀、批注。",
+        novel.title,
+        non_blank(&novel.genre, "通用"),
+        non_blank(&novel.style, "通用"),
+        non_blank(&novel.pov, "第三人称"),
+        non_blank(&novel.tone, "平稳"),
+        focus_desc,
+    );
+    let user = format!(
+        "【章节标题】{}\n\n【原文】\n{}\n\n请润色后返回完整正文。",
+        chapter.title, chapter.content
+    );
+    vec![ChatMessage::system(system), ChatMessage::user(user)]
+}
+
+// ============== 新增动作：风格转换 ==============
+
+pub fn build_style_transfer(
+    novel: &Novel,
+    chapter: &Chapter,
+    target_style: &str,
+    source_style: Option<&str>,
+) -> Vec<ChatMessage> {
+    let src_hint = source_style
+        .map(|s| format!("原文风格：{}\n", s))
+        .unwrap_or_default();
+    let system = format!(
+        "你是文学风格的模仿大师。请将用户提供的章节正文改写为「{}」风格。\n\
+         原作品类型={}，视角={}，基调={}。\n\
+         要求：\n\
+         - 保留核心情节、人物、关键信息\n\
+         - 句式、用词、节奏、修辞要明显地呈现「{}」的标志性特征\n\
+         - 不要输出任何说明、前缀、对比分析，只返回改写后的完整正文",
+        target_style,
+        non_blank(&novel.genre, "通用"),
+        non_blank(&novel.pov, "第三人称"),
+        non_blank(&novel.tone, "平稳"),
+        target_style,
+    );
+    let user = format!(
+        "【目标风格】\n{}{}\n【章节标题】{}\n\n【原文】\n{}\n\n请改写为「{}」风格并返回完整正文。",
+        target_style, src_hint, chapter.title, chapter.content, target_style
+    );
+    vec![ChatMessage::system(system), ChatMessage::user(user)]
+}
+
+// ============== 新增动作：人设一致性检查 ==============
+
+pub fn build_consistency_check(
+    novel: &Novel,
+    chapter: &Chapter,
+    characters: &[Character],
+) -> Vec<ChatMessage> {
+    let mut char_block: Vec<String> = characters
+        .iter()
+        .map(|c| {
+            let traits = non_blank(&c.traits, "（无）");
+            let backstory = non_blank(&c.backstory, "（无）");
+            format!(
+                "## {}（{}）\n- 描述：{}\n- 性格标签：{}\n- 出身/经历：{}",
+                c.name,
+                non_blank(&c.role, "角色"),
+                non_blank(&c.description, "（无）"),
+                traits,
+                backstory,
+            )
+        })
+        .collect();
+
+    if char_block.is_empty() {
+        char_block.push("（未指定角色，将基于章节内出现的角色做一般性检查）".to_string());
+    }
+
+    let system = format!(
+        "你是《{}》的人设一致性审校。\n\
+         仔细阅读章节正文与人物设定，找出**客观存在**的人设矛盾：\n\
+         - 角色言行是否违反其性格标签、背景、价值观\n\
+         - 角色之间的关系是否前后一致（敌友、亲疏、师徒等）\n\
+         - 角色已知的身体特征、年龄、技能、过往经历是否被违反\n\
+         - 同一角色在前后文是否出现不可调和的逻辑冲突\n\n\
+         输出 Markdown 报告，包含以下结构：\n\
+         1. **总体评估**（一段话：人设一致度百分比 + 简要说明）\n\
+         2. **发现的问题**（按角色分组，每条问题用 `###` 三级标题，列出原文摘录、对应设定、冲突分析、修改建议）\n\
+         3. **未发现问题的角色**（简短列出）\n\n\
+         如果找不到问题，也要明确说\"未发现明显人设冲突\"，不要编造问题。",
+        novel.title
+    );
+    let user = format!(
+        "【作品类型】{}\n【本章标题】{}\n\n【人物设定】\n{}\n\n【章节正文】\n{}\n\n请输出一致性检查报告。",
+        non_blank(&novel.genre, "通用"),
+        chapter.title,
+        char_block.join("\n\n"),
+        chapter.content,
+    );
+    vec![ChatMessage::system(system), ChatMessage::user(user)]
+}
+
 fn non_blank(s: &str, fallback: &str) -> String {
     if s.trim().is_empty() { fallback.to_string() } else { s.to_string() }
 }

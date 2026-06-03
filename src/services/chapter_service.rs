@@ -105,3 +105,31 @@ pub async fn reorder(
     )
     .await
 }
+
+/// AI 写完后回写：先做权限校验，再覆写 content / summary。
+/// 这是一个薄包装；如果之后接入版本快照系统，只需在此函数内增加快照写入，
+/// 所有调用方（generation_service 的 run_*）无需修改。
+#[allow(clippy::too_many_arguments)]
+pub async fn write_ai_result(
+    pool: &SqlitePool,
+    owner_id: &str,
+    id: &str,
+    new_content: &str,
+    new_summary: Option<&str>,
+    _action: &str,
+    _note: &str,
+) -> AppResult<Chapter> {
+    let c = get(pool, owner_id, id).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    repositories::chapters::update(
+        pool,
+        &c.id,
+        None,
+        new_summary,
+        Some(new_content),
+        None,
+        None,
+        &now,
+    )
+    .await
+}

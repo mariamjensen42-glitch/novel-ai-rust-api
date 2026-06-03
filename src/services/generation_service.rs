@@ -83,6 +83,57 @@ pub struct CharacterGenParams<'a> {
     pub max_tokens: Option<u32>,
 }
 
+// ============== 新增：翻译 ==============
+
+pub struct TranslateParams<'a> {
+    pub chapter: &'a Chapter,
+    pub novel: &'a Novel,
+    pub characters: &'a [Character],
+    pub target_language: &'a str,
+    pub source_language: Option<&'a str>,
+    pub preserve_style: bool,
+    pub model: &'a str,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+    pub chapter_owner_id: String,
+}
+
+// ============== 新增：润色 ==============
+
+pub struct PolishParams<'a> {
+    pub chapter: &'a Chapter,
+    pub novel: &'a Novel,
+    pub focus: &'a str,
+    pub model: &'a str,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+    pub chapter_owner_id: String,
+}
+
+// ============== 新增：风格转换 ==============
+
+pub struct StyleTransferParams<'a> {
+    pub chapter: &'a Chapter,
+    pub novel: &'a Novel,
+    pub target_style: &'a str,
+    pub source_style: Option<&'a str>,
+    pub model: &'a str,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+    pub chapter_owner_id: String,
+}
+
+// ============== 新增：人设一致性检查 ==============
+
+pub struct ConsistencyCheckParams<'a> {
+    pub chapter: &'a Chapter,
+    pub novel: &'a Novel,
+    pub characters: &'a [Character],
+    pub model: &'a str,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+}
+
 pub async fn run_continue(
     pool: &SqlitePool,
     http_client: &Arc<Client>,
@@ -333,4 +384,153 @@ async fn build_stream(
         max_tokens,
     };
     provider.stream(req).await
+}
+
+// ============== 翻译 ==============
+
+pub async fn run_translate(
+    pool: &SqlitePool,
+    http_client: &Arc<Client>,
+    p: TranslateParams<'_>,
+    tx: mpsc::Sender<SsePayload>,
+) -> AppResult<()> {
+    let messages = prompts::build_translate(
+        p.novel,
+        p.chapter,
+        p.characters,
+        p.target_language,
+        p.source_language,
+        p.preserve_style,
+    );
+    let chapter_id = p.chapter.id.clone();
+    let owner_id = p.chapter_owner_id.clone();
+    let (stream, _usage) = build_stream(http_client, p.model, messages, p.temperature, p.max_tokens).await?;
+    tokio::pin!(stream);
+
+    let mut total = String::new();
+    while let Some(ev) = stream.next().await {
+        let ev = ev?;
+        if let StreamEvent::Chunk(text) = ev {
+            total.push_str(&text);
+            let _ = tx.send(SsePayload::Chunk { text }).await;
+        }
+    }
+    let note = format!("→ {} ({})", p.target_language, if p.preserve_style { "preserve-style" } else { "natural" });
+    let ch = crate::services::chapter_service::write_ai_result(
+        pool,
+        &owner_id,
+        &chapter_id,
+        &total,
+        None,
+        "translate",
+        &note,
+    )
+    .await?;
+    let _ = tx
+        .send(SsePayload::Done { chapter_id: ch.id, new_word_count: ch.word_count })
+        .await;
+    Ok(())
+}
+
+// ============== 润色 ==============
+
+pub async fn run_polish(
+    pool: &SqlitePool,
+    http_client: &Arc<Client>,
+    p: PolishParams<'_>,
+    tx: mpsc::Sender<SsePayload>,
+) -> AppResult<()> {
+    let messages = prompts::build_polish(p.novel, p.chapter, p.focus);
+    let chapter_id = p.chapter.id.clone();
+    let owner_id = p.chapter_owner_id.clone();
+    let (stream, _usage) = build_stream(http_client, p.model, messages, p.temperature, p.max_tokens).await?;
+    tokio::pin!(stream);
+
+    let mut total = String::new();
+    while let Some(ev) = stream.next().await {
+        let ev = ev?;
+        if let StreamEvent::Chunk(text) = ev {
+            total.push_str(&text);
+            let _ = tx.send(SsePayload::Chunk { text }).await;
+        }
+    }
+    let note = format!("focus={}", p.focus);
+    let ch = crate::services::chapter_service::write_ai_result(
+        pool,
+        &owner_id,
+        &chapter_id,
+        &total,
+        None,
+        "polish",
+        &note,
+    )
+    .await?;
+    let _ = tx
+        .send(SsePayload::Done { chapter_id: ch.id, new_word_count: ch.word_count })
+        .await;
+    Ok(())
+}
+
+// ============== 风格转换 ==============
+
+pub async fn run_style_transfer(
+    pool: &SqlitePool,
+    http_client: &Arc<Client>,
+    p: StyleTransferParams<'_>,
+    tx: mpsc::Sender<SsePayload>,
+) -> AppResult<()> {
+    let messages = prompts::build_style_transfer(p.novel, p.chapter, p.target_style, p.source_style);
+    let chapter_id = p.chapter.id.clone();
+    let owner_id = p.chapter_owner_id.clone();
+    let (stream, _usage) = build_stream(http_client, p.model, messages, p.temperature, p.max_tokens).await?;
+    tokio::pin!(stream);
+
+    let mut total = String::new();
+    while let Some(ev) = stream.next().await {
+        let ev = ev?;
+        if let StreamEvent::Chunk(text) = ev {
+            total.push_str(&text);
+            let _ = tx.send(SsePayload::Chunk { text }).await;
+        }
+    }
+    let note = format!("→ {}", p.target_style);
+    let ch = crate::services::chapter_service::write_ai_result(
+        pool,
+        &owner_id,
+        &chapter_id,
+        &total,
+        None,
+        "style-transfer",
+        &note,
+    )
+    .await?;
+    let _ = tx
+        .send(SsePayload::Done { chapter_id: ch.id, new_word_count: ch.word_count })
+        .await;
+    Ok(())
+}
+
+// ============== 人设一致性检查 ==============
+// 区别于上述动作：检查只流式输出报告 markdown，不修改章节内容、不建版本快照。
+
+pub async fn run_consistency_check(
+    http_client: &Arc<Client>,
+    p: ConsistencyCheckParams<'_>,
+    tx: mpsc::Sender<SsePayload>,
+) -> AppResult<()> {
+    let messages = prompts::build_consistency_check(p.novel, p.chapter, p.characters);
+    let (stream, _usage) = build_stream(http_client, p.model, messages, p.temperature, p.max_tokens).await?;
+    tokio::pin!(stream);
+
+    while let Some(ev) = stream.next().await {
+        let ev = ev?;
+        if let StreamEvent::Chunk(text) = ev {
+            let _ = tx.send(SsePayload::Chunk { text }).await;
+        }
+    }
+    // 用空 chapter_id + 0 字数 表示"这是分析报告，不是内容更新"。
+    let _ = tx
+        .send(SsePayload::Done { chapter_id: String::new(), new_word_count: 0 })
+        .await;
+    Ok(())
 }

@@ -14,6 +14,11 @@ use novel_ai_rust_api::auth::AuthMiddleware;
 use novel_ai_rust_api::config::get_config;
 use novel_ai_rust_api::db;
 use novel_ai_rust_api::handlers;
+use novel_ai_rust_api::handlers::generation::{
+    CharacterGenRequest, ConsistencyCheckRequest, ContinueRequest, DialogueRequest, ExpandRequest,
+    OutlineGenRequest, PolishRequest, RewriteRequest, StyleTransferRequest, SummarizeRequest,
+    TranslateRequest,
+};
 use novel_ai_rust_api::models::character::{Character, CreateCharacterRequest, UpdateCharacterRequest};
 use novel_ai_rust_api::models::chapter::{Chapter, CreateChapterRequest, ReorderRequest, UpdateChapterRequest};
 use novel_ai_rust_api::models::novel::{CreateNovelRequest, Novel, UpdateNovelRequest};
@@ -36,6 +41,9 @@ use novel_ai_rust_api::models::user::{AuthResponse, LoginRequest, RegisterReques
             Chapter, CreateChapterRequest, UpdateChapterRequest, ReorderRequest,
             Character, CreateCharacterRequest, UpdateCharacterRequest,
             OutlineNode, OutlineTreeNode, CreateOutlineNodeRequest, UpdateOutlineNodeRequest,
+            ContinueRequest, RewriteRequest, ExpandRequest, SummarizeRequest, DialogueRequest,
+            OutlineGenRequest, CharacterGenRequest,
+            TranslateRequest, PolishRequest, StyleTransferRequest, ConsistencyCheckRequest,
         )
     ),
     tags(
@@ -45,6 +53,7 @@ use novel_ai_rust_api::models::user::{AuthResponse, LoginRequest, RegisterReques
         (name = "chapters", description = "章节"),
         (name = "characters", description = "人物"),
         (name = "outline", description = "大纲"),
+        (name = "generation", description = "AI 生成（续写 / 改写 / 扩写 / 摘要 / 对话 / 大纲 / 人物 / 翻译 / 润色 / 风格转换 / 人设一致性）"),
         (name = "health", description = "健康检查"),
     )
 )]

@@ -84,6 +84,54 @@ pub struct CharacterGenRequest {
     pub max_tokens: Option<u32>,
 }
 
+// ============== 新增：翻译 / 润色 / 风格转换 / 人设一致性检查 ==============
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct TranslateRequest {
+    pub chapter_id: String,
+    pub model: String,
+    /// 目标语言，自由文本，如 "英文"、"日文"、"法语"、"English"、"Japanese"
+    pub target_language: String,
+    /// 源语言（可选，用于辅助）
+    pub source_language: Option<String>,
+    /// 是否保留原作风格
+    pub preserve_style: Option<bool>,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PolishRequest {
+    pub chapter_id: String,
+    pub model: String,
+    /// 润色重点：dialogue / description / pacing / grammar / overall
+    pub focus: Option<String>,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct StyleTransferRequest {
+    pub chapter_id: String,
+    pub model: String,
+    /// 目标风格，如 "海明威式极简"、"金庸式武侠"、"意识流"、"赛博朋克"
+    pub target_style: String,
+    /// 源风格（可选，辅助用）
+    pub source_style: Option<String>,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConsistencyCheckRequest {
+    pub chapter_id: String,
+    pub model: String,
+    /// 要检查的角色 ID 列表；不传则检查章节内出现的所有角色
+    pub character_ids: Option<Vec<String>>,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+}
+
 pub async fn continue_chapter(
     user: CurrentUser,
     req: web::Json<ContinueRequest>,
@@ -330,6 +378,173 @@ pub async fn character_gen(
     Ok(sse_ok(sse_stream(rx)))
 }
 
+pub async fn translate(
+    user: CurrentUser,
+    req: web::Json<TranslateRequest>,
+    http: web::Data<Arc<reqwest::Client>>,
+) -> AppResult<HttpResponse> {
+    let body = req.into_inner();
+    if body.target_language.trim().is_empty() {
+        return Err(AppError::Validation("target_language is required".into()));
+    }
+    let chapter = crate::services::chapter_service::get(db(), &user.id, &body.chapter_id).await?;
+    let novel = crate::services::novel_service::get(db(), &user.id, &chapter.novel_id).await?;
+    let characters = repositories::characters::list_by_novel(db(), &chapter.novel_id).await?;
+    let (tx, rx) = mpsc::channel::<SsePayload>(64);
+    let pool = db().clone();
+    let http2 = http.get_ref().clone();
+    tokio::spawn(async move {
+        let res = generation_service::run_translate(
+            &pool,
+            &http2,
+            generation_service::TranslateParams {
+                chapter: &chapter,
+                novel: &novel,
+                characters: &characters,
+                target_language: &body.target_language,
+                source_language: body.source_language.as_deref(),
+                preserve_style: body.preserve_style.unwrap_or(true),
+                model: &body.model,
+                temperature: body.temperature,
+                max_tokens: body.max_tokens,
+                chapter_owner_id: user.id.clone(),
+            },
+            tx.clone(),
+        )
+        .await;
+        if let Err(e) = res {
+            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
+        }
+    });
+    Ok(sse_ok(sse_stream(rx)))
+}
+
+pub async fn polish(
+    user: CurrentUser,
+    req: web::Json<PolishRequest>,
+    http: web::Data<Arc<reqwest::Client>>,
+) -> AppResult<HttpResponse> {
+    let body = req.into_inner();
+    let focus = body.focus.unwrap_or_else(|| "overall".to_string());
+    let allowed = ["dialogue", "description", "pacing", "grammar", "overall"];
+    if !allowed.contains(&focus.as_str()) {
+        return Err(AppError::Validation(format!(
+            "focus must be one of {:?}, got {}",
+            allowed, focus
+        )));
+    }
+    let chapter = crate::services::chapter_service::get(db(), &user.id, &body.chapter_id).await?;
+    let novel = crate::services::novel_service::get(db(), &user.id, &chapter.novel_id).await?;
+    let (tx, rx) = mpsc::channel::<SsePayload>(64);
+    let pool = db().clone();
+    let http2 = http.get_ref().clone();
+    tokio::spawn(async move {
+        let res = generation_service::run_polish(
+            &pool,
+            &http2,
+            generation_service::PolishParams {
+                chapter: &chapter,
+                novel: &novel,
+                focus: &focus,
+                model: &body.model,
+                temperature: body.temperature,
+                max_tokens: body.max_tokens,
+                chapter_owner_id: user.id.clone(),
+            },
+            tx.clone(),
+        )
+        .await;
+        if let Err(e) = res {
+            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
+        }
+    });
+    Ok(sse_ok(sse_stream(rx)))
+}
+
+pub async fn style_transfer(
+    user: CurrentUser,
+    req: web::Json<StyleTransferRequest>,
+    http: web::Data<Arc<reqwest::Client>>,
+) -> AppResult<HttpResponse> {
+    let body = req.into_inner();
+    if body.target_style.trim().is_empty() {
+        return Err(AppError::Validation("target_style is required".into()));
+    }
+    let chapter = crate::services::chapter_service::get(db(), &user.id, &body.chapter_id).await?;
+    let novel = crate::services::novel_service::get(db(), &user.id, &chapter.novel_id).await?;
+    let (tx, rx) = mpsc::channel::<SsePayload>(64);
+    let pool = db().clone();
+    let http2 = http.get_ref().clone();
+    tokio::spawn(async move {
+        let res = generation_service::run_style_transfer(
+            &pool,
+            &http2,
+            generation_service::StyleTransferParams {
+                chapter: &chapter,
+                novel: &novel,
+                target_style: &body.target_style,
+                source_style: body.source_style.as_deref(),
+                model: &body.model,
+                temperature: body.temperature,
+                max_tokens: body.max_tokens,
+                chapter_owner_id: user.id.clone(),
+            },
+            tx.clone(),
+        )
+        .await;
+        if let Err(e) = res {
+            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
+        }
+    });
+    Ok(sse_ok(sse_stream(rx)))
+}
+
+pub async fn consistency_check(
+    user: CurrentUser,
+    req: web::Json<ConsistencyCheckRequest>,
+    http: web::Data<Arc<reqwest::Client>>,
+) -> AppResult<HttpResponse> {
+    let body = req.into_inner();
+    let chapter = crate::services::chapter_service::get(db(), &user.id, &body.chapter_id).await?;
+    let novel = crate::services::novel_service::get(db(), &user.id, &chapter.novel_id).await?;
+    // 角色校验：要么不传（用全部），要么传合法 id
+    let characters = match body.character_ids {
+        Some(ids) if !ids.is_empty() => {
+            let cs = repositories::characters::find_many_by_ids(db(), &ids).await?;
+            for c in &cs {
+                if c.novel_id != chapter.novel_id {
+                    return Err(AppError::Validation(
+                        "character does not belong to chapter's novel".into(),
+                    ));
+                }
+            }
+            cs
+        }
+        _ => repositories::characters::list_by_novel(db(), &chapter.novel_id).await?,
+    };
+    let (tx, rx) = mpsc::channel::<SsePayload>(64);
+    let http2 = http.get_ref().clone();
+    tokio::spawn(async move {
+        let res = generation_service::run_consistency_check(
+            &http2,
+            generation_service::ConsistencyCheckParams {
+                chapter: &chapter,
+                novel: &novel,
+                characters: &characters,
+                model: &body.model,
+                temperature: body.temperature,
+                max_tokens: body.max_tokens,
+            },
+            tx.clone(),
+        )
+        .await;
+        if let Err(e) = res {
+            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
+        }
+    });
+    Ok(sse_ok(sse_stream(rx)))
+}
+
 fn sse_ok<S>(stream: S) -> HttpResponse
 where
     S: futures_util::Stream<Item = Result<actix_web::web::Bytes, std::convert::Infallible>> + 'static,
@@ -350,6 +565,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/summarize", web::post().to(summarize))
             .route("/dialogue", web::post().to(dialogue))
             .route("/outline", web::post().to(outline_gen))
-            .route("/character", web::post().to(character_gen)),
+            .route("/character", web::post().to(character_gen))
+            .route("/translate", web::post().to(translate))
+            .route("/polish", web::post().to(polish))
+            .route("/style-transfer", web::post().to(style_transfer))
+            .route("/character-consistency-check", web::post().to(consistency_check)),
     );
 }
