@@ -106,6 +106,7 @@ where
 
 fn is_public_path(path: &str) -> bool {
     path == "/health"
+        || path == "/metrics"
         || path.starts_with("/auth/register")
         || path.starts_with("/auth/login")
         || path.starts_with("/docs")

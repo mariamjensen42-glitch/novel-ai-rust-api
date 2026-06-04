@@ -6,7 +6,7 @@ use actix_web::middleware::DefaultHeaders;
 use actix_web::{web, App, HttpResponse, HttpServer};
 use reqwest::Client;
 use tracing_actix_web::TracingLogger;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -19,12 +19,14 @@ use novel_ai_rust_api::handlers::generation::{
     OutlineGenRequest, PolishRequest, RewriteRequest, StyleTransferRequest, SummarizeRequest,
     TranslateRequest,
 };
+use novel_ai_rust_api::middleware::request_id::middleware as request_id_fn;
 use novel_ai_rust_api::models::character::{Character, CreateCharacterRequest, UpdateCharacterRequest};
 use novel_ai_rust_api::models::chapter::{Chapter, CreateChapterRequest, ReorderRequest, UpdateChapterRequest};
 use novel_ai_rust_api::models::novel::{CreateNovelRequest, Novel, UpdateNovelRequest};
 use novel_ai_rust_api::models::outline::{CreateOutlineNodeRequest, OutlineNode, OutlineTreeNode, UpdateOutlineNodeRequest};
 use novel_ai_rust_api::models::project::{CreateProjectRequest, Project, UpdateProjectRequest};
 use novel_ai_rust_api::models::user::{AuthResponse, LoginRequest, RegisterRequest, User};
+use novel_ai_rust_api::observability::metrics;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -61,9 +63,29 @@ struct ApiDoc;
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .try_init();
+
+    // `RUST_LOG_FORMAT=json` 输出 JSON 行（接 Loki/ES），否则 pretty（dev 友好）
+    let json_mode = std::env::var("RUST_LOG_FORMAT").as_deref() == Ok("json");
+
+    let result = if json_mode {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                fmt::layer()
+                    .json()
+                    .with_current_span(true)
+                    .with_span_list(false)
+                    .with_target(true),
+            )
+            .try_init()
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().pretty().with_target(true))
+            .try_init()
+    };
+
+    let _ = result;
 }
 
 fn build_http_client() -> Arc<Client> {
@@ -77,6 +99,12 @@ fn build_http_client() -> Arc<Client> {
 
 async fn serve_openapi() -> HttpResponse {
     HttpResponse::Ok().json(ApiDoc::openapi())
+}
+
+async fn metrics_endpoint() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/plain; version=0.0.4; charset=utf-8")
+        .body(metrics::render_text())
 }
 
 #[actix_web::main]
@@ -99,6 +127,7 @@ async fn main() -> std::io::Result<()> {
         let openapi = ApiDoc::openapi();
         App::new()
             .wrap(TracingLogger::default())
+            .wrap(actix_web::middleware::from_fn(request_id_fn)) // 注入 request_id 到 span + extensions + 响应头
             .wrap(AuthMiddleware)
             .wrap(DefaultHeaders::new().add(("X-Service", "novel-ai")))
             .wrap(Cors::permissive())
@@ -109,6 +138,7 @@ async fn main() -> std::io::Result<()> {
                     .url("/api-docs/openapi.json", openapi),
             )
             .route("/api-docs/openapi.json", web::get().to(serve_openapi))
+            .route("/metrics", web::get().to(metrics_endpoint))
             .configure(handlers::health::configure)
             .configure(handlers::auth::configure)
             .configure(handlers::projects::configure)

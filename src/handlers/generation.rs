@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 use crate::auth::CurrentUser;
 use crate::db::pool::pool;
 use crate::error::{AppError, AppResult};
+use crate::observability::panic_guard::spawn_catch_with_tx;
 use crate::repositories;
 use crate::services::generation_service;
 use crate::sse::{sse_stream, SsePayload};
@@ -145,8 +146,8 @@ pub async fn continue_chapter(
     let (tx, rx) = mpsc::channel::<SsePayload>(64);
     let pool = db().clone();
     let http2 = http.get_ref().clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_continue(
+    spawn_catch_with_tx("generation.continue", tx.clone(), async move {
+        generation_service::run_continue(
             &pool,
             &http2,
             generation_service::ContinueParams {
@@ -160,10 +161,7 @@ pub async fn continue_chapter(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -180,8 +178,8 @@ pub async fn rewrite(
     let pool = db().clone();
     let http2 = http.get_ref().clone();
     let instruction = body.instruction.clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_rewrite(
+    spawn_catch_with_tx("generation.rewrite", tx.clone(), async move {
+        generation_service::run_rewrite(
             &pool,
             &http2,
             generation_service::RewriteParams {
@@ -194,10 +192,7 @@ pub async fn rewrite(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -213,8 +208,8 @@ pub async fn expand(
     let (tx, rx) = mpsc::channel::<SsePayload>(64);
     let http2 = http.get_ref().clone();
     let anchor = body.anchor.clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_expand(
+    spawn_catch_with_tx("generation.expand", tx.clone(), async move {
+        generation_service::run_expand(
             db(),
             &http2,
             generation_service::ExpandParams {
@@ -228,10 +223,7 @@ pub async fn expand(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -247,8 +239,8 @@ pub async fn summarize(
     let (tx, rx) = mpsc::channel::<SsePayload>(64);
     let pool = db().clone();
     let http2 = http.get_ref().clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_summarize(
+    spawn_catch_with_tx("generation.summarize", tx.clone(), async move {
+        generation_service::run_summarize(
             &pool,
             &http2,
             generation_service::SummarizeParams {
@@ -261,10 +253,7 @@ pub async fn summarize(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -288,8 +277,8 @@ pub async fn dialogue(
     let (tx, rx) = mpsc::channel::<SsePayload>(64);
     let http2 = http.get_ref().clone();
     let situation = body.situation.clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_dialogue(
+    spawn_catch_with_tx("generation.dialogue", tx.clone(), async move {
+        generation_service::run_dialogue(
             db(),
             &http2,
             generation_service::DialogueParams {
@@ -303,10 +292,7 @@ pub async fn dialogue(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -321,8 +307,8 @@ pub async fn outline_gen(
     let (tx, rx) = mpsc::channel::<SsePayload>(64);
     let http2 = http.get_ref().clone();
     let idea = body.idea.clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_outline(
+    spawn_catch_with_tx("generation.outline", tx.clone(), async move {
+        generation_service::run_outline(
             db(),
             &http2,
             generation_service::OutlineGenParams {
@@ -335,10 +321,7 @@ pub async fn outline_gen(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -355,8 +338,8 @@ pub async fn character_gen(
     let concept = body.concept.clone();
     let name = body.name.clone();
     let role = body.role.clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_character(
+    spawn_catch_with_tx("generation.character", tx.clone(), async move {
+        generation_service::run_character(
             db(),
             &http2,
             generation_service::CharacterGenParams {
@@ -370,10 +353,7 @@ pub async fn character_gen(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -393,8 +373,8 @@ pub async fn translate(
     let (tx, rx) = mpsc::channel::<SsePayload>(64);
     let pool = db().clone();
     let http2 = http.get_ref().clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_translate(
+    spawn_catch_with_tx("generation.translate", tx.clone(), async move {
+        generation_service::run_translate(
             &pool,
             &http2,
             generation_service::TranslateParams {
@@ -411,10 +391,7 @@ pub async fn translate(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -438,8 +415,8 @@ pub async fn polish(
     let (tx, rx) = mpsc::channel::<SsePayload>(64);
     let pool = db().clone();
     let http2 = http.get_ref().clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_polish(
+    spawn_catch_with_tx("generation.polish", tx.clone(), async move {
+        generation_service::run_polish(
             &pool,
             &http2,
             generation_service::PolishParams {
@@ -453,10 +430,7 @@ pub async fn polish(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -475,8 +449,8 @@ pub async fn style_transfer(
     let (tx, rx) = mpsc::channel::<SsePayload>(64);
     let pool = db().clone();
     let http2 = http.get_ref().clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_style_transfer(
+    spawn_catch_with_tx("generation.style_transfer", tx.clone(), async move {
+        generation_service::run_style_transfer(
             &pool,
             &http2,
             generation_service::StyleTransferParams {
@@ -491,10 +465,7 @@ pub async fn style_transfer(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }
@@ -524,8 +495,8 @@ pub async fn consistency_check(
     };
     let (tx, rx) = mpsc::channel::<SsePayload>(64);
     let http2 = http.get_ref().clone();
-    tokio::spawn(async move {
-        let res = generation_service::run_consistency_check(
+    spawn_catch_with_tx("generation.consistency_check", tx.clone(), async move {
+        generation_service::run_consistency_check(
             &http2,
             generation_service::ConsistencyCheckParams {
                 chapter: &chapter,
@@ -537,10 +508,7 @@ pub async fn consistency_check(
             },
             tx.clone(),
         )
-        .await;
-        if let Err(e) = res {
-            let _ = tx.send(SsePayload::Error { message: e.to_string() }).await;
-        }
+        .await
     });
     Ok(sse_ok(sse_stream(rx)))
 }

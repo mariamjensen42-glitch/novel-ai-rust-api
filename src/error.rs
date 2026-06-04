@@ -2,6 +2,8 @@ use actix_web::{http::StatusCode, HttpResponse, ResponseError};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::observability::{metrics::ERRORS_TOTAL, public_message};
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("validation error: {0}")]
@@ -62,10 +64,21 @@ impl ResponseError for AppError {
     }
 
     fn error_response(&self) -> HttpResponse {
+        // 完整细节进日志（含 self）——保留给运维定位
+        tracing::error!(
+            error.code = self.code(),
+            error.detail = %self,
+            "request failed"
+        );
+
+        // 业务指标：按 code 计数
+        ERRORS_TOTAL.with_label_values(&[self.code()]).inc();
+
+        // 脱敏后返前端
         let body = ErrorBody {
             error: ErrorBodyInner {
                 code: self.code(),
-                message: self.to_string(),
+                message: public_message(self),
             },
         };
         HttpResponse::build(self.status_code()).json(body)
