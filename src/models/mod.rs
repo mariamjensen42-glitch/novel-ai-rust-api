@@ -1,5 +1,12 @@
-pub mod prediction;
-pub mod health;
-pub mod inference;
-pub mod error;
-pub mod cache;
+pub mod character;
+pub mod chapter;
+pub mod novel;
+pub mod outline;
+pub mod project;
+pub mod user;
+
+use nanoid::nanoid;
+
+pub fn new_id() -> String {
+    nanoid!(21)
+}

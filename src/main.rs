@@ -1,164 +1,154 @@
-use actix_web::{App, HttpServer, dev::{Service, ServiceRequest, ServiceResponse}, web};
+use std::sync::Arc;
+use std::time::Duration;
+
 use actix_cors::Cors;
-use dotenv::dotenv;
-use tracing_actix_web::TracingLogger;
-use tracing_subscriber::fmt;
-use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use actix_web::middleware::DefaultHeaders;
+use actix_web::{web, App, HttpResponse, HttpServer};
 use reqwest::Client;
+use tracing_actix_web::TracingLogger;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
-use novel_ai_rust_api::api;
-use novel_ai_rust_api::models;
-use novel_ai_rust_api::config;
+use novel_ai_rust_api::auth::AuthMiddleware;
+use novel_ai_rust_api::config::get_config;
+use novel_ai_rust_api::db;
+use novel_ai_rust_api::handlers;
+use novel_ai_rust_api::handlers::generation::{
+    CharacterGenRequest, ConsistencyCheckRequest, ContinueRequest, DialogueRequest, ExpandRequest,
+    OutlineGenRequest, PolishRequest, RewriteRequest, StyleTransferRequest, SummarizeRequest,
+    TranslateRequest,
+};
+use novel_ai_rust_api::middleware::request_id::middleware as request_id_fn;
+use novel_ai_rust_api::models::character::{Character, CreateCharacterRequest, UpdateCharacterRequest};
+use novel_ai_rust_api::models::chapter::{Chapter, CreateChapterRequest, ReorderRequest, UpdateChapterRequest};
+use novel_ai_rust_api::models::novel::{CreateNovelRequest, Novel, UpdateNovelRequest};
+use novel_ai_rust_api::models::outline::{CreateOutlineNodeRequest, OutlineNode, OutlineTreeNode, UpdateOutlineNodeRequest};
+use novel_ai_rust_api::models::project::{CreateProjectRequest, Project, UpdateProjectRequest};
+use novel_ai_rust_api::models::user::{AuthResponse, LoginRequest, RegisterRequest, User};
+use novel_ai_rust_api::observability::metrics;
 
-// 缓存配置
-const CACHE_MAX_SIZE: usize = 1000;
-const CACHE_TTL_SECONDS: u64 = 3600; // 1小时
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "AI Novel Writing API",
+        version = "0.2.0",
+        description = "AI 辅助长篇小说创作后端",
+    ),
+    components(
+        schemas(
+            User, RegisterRequest, LoginRequest, AuthResponse,
+            Project, CreateProjectRequest, UpdateProjectRequest,
+            Novel, CreateNovelRequest, UpdateNovelRequest,
+            Chapter, CreateChapterRequest, UpdateChapterRequest, ReorderRequest,
+            Character, CreateCharacterRequest, UpdateCharacterRequest,
+            OutlineNode, OutlineTreeNode, CreateOutlineNodeRequest, UpdateOutlineNodeRequest,
+            ContinueRequest, RewriteRequest, ExpandRequest, SummarizeRequest, DialogueRequest,
+            OutlineGenRequest, CharacterGenRequest,
+            TranslateRequest, PolishRequest, StyleTransferRequest, ConsistencyCheckRequest,
+        )
+    ),
+    tags(
+        (name = "auth", description = "认证"),
+        (name = "projects", description = "项目"),
+        (name = "novels", description = "小说"),
+        (name = "chapters", description = "章节"),
+        (name = "characters", description = "人物"),
+        (name = "outline", description = "大纲"),
+        (name = "generation", description = "AI 生成（续写 / 改写 / 扩写 / 摘要 / 对话 / 大纲 / 人物 / 翻译 / 润色 / 风格转换 / 人设一致性）"),
+        (name = "health", description = "健康检查"),
+    )
+)]
+struct ApiDoc;
 
-// 速率限制中间件
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-// 速率限制存储结构
-struct RateLimitStore {
-    requests: HashMap<String, Vec<Instant>>,
+    // `RUST_LOG_FORMAT=json` 输出 JSON 行（接 Loki/ES），否则 pretty（dev 友好）
+    let json_mode = std::env::var("RUST_LOG_FORMAT").as_deref() == Ok("json");
+
+    let result = if json_mode {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                fmt::layer()
+                    .json()
+                    .with_current_span(true)
+                    .with_span_list(false)
+                    .with_target(true),
+            )
+            .try_init()
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().pretty().with_target(true))
+            .try_init()
+    };
+
+    let _ = result;
 }
 
-impl RateLimitStore {
-    fn new() -> Self {
-        Self {
-            requests: HashMap::new(),
-        }
-    }
-    
-    // 检查是否超过速率限制
-    fn check_limit(&mut self, key: &str, max_requests: u32, window: Duration) -> bool {
-        let now = Instant::now();
-        
-        // 获取或创建该key的请求记录
-        let requests = self.requests.entry(key.to_string()).or_default();
-        
-        // 移除窗口外的请求
-        requests.retain(|&time| now.duration_since(time) < window);
-        
-        // 检查是否超过限制
-        if requests.len() >= max_requests as usize {
-            false
-        } else {
-            // 添加当前请求
-            requests.push(now);
-            true
-        }
-    }
+fn build_http_client() -> Arc<Client> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .expect("failed to build http client");
+    Arc::new(client)
 }
 
-// 速率限制中间件
-struct RateLimiter {
-    store: Arc<Mutex<RateLimitStore>>,
+async fn serve_openapi() -> HttpResponse {
+    HttpResponse::Ok().json(ApiDoc::openapi())
 }
 
-impl RateLimiter {
-    fn new() -> Self {
-        Self {
-            store: Arc::new(Mutex::new(RateLimitStore::new())),
-        }
-    }
-}
-
-// 实现Transform trait
-impl<S, B> actix_web::dev::Transform<S, ServiceRequest> for RateLimiter
-where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
-    S::Future: 'static,
-    B: 'static,
-{
-    type Response = ServiceResponse<B>;
-    type Error = actix_web::Error;
-    type Transform = RateLimitMiddleware<S>;
-    type InitError = ();
-    type Future = std::future::Ready<Result<Self::Transform, Self::InitError>>;
-
-    fn new_transform(&self, service: S) -> Self::Future {
-        std::future::ready(Ok(RateLimitMiddleware {
-            service: Arc::new(service),
-            store: self.store.clone(),
-        }))
-    }
-}
-
-// 中间件实现
-struct RateLimitMiddleware<S> {
-    service: Arc<S>,
-    store: Arc<Mutex<RateLimitStore>>,
-}
-
-impl<S, B> Service<ServiceRequest> for RateLimitMiddleware<S>
-where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
-    S::Future: 'static,
-    B: 'static,
-{
-    type Response = ServiceResponse<B>;
-    type Error = actix_web::Error;
-    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>>>>;
-
-    fn poll_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-        self.service.as_ref().poll_ready(cx)
-    }
-
-    fn call(&self, req: ServiceRequest) -> Self::Future {
-        // 获取客户端IP
-        let client_ip = req.connection_info().realip_remote_addr().unwrap_or("0.0.0.0").to_string();
-        let store = self.store.clone();
-        let service = Arc::clone(&self.service);
-        
-        Box::pin(async move {
-            // 检查速率限制
-            let mut store = store.lock().unwrap();
-            if !store.check_limit(&client_ip, 60, Duration::from_secs(60)) {
-                // 超过限制，返回429错误
-                Err(actix_web::error::ErrorTooManyRequests("Rate limit exceeded"))
-            } else {
-                // 未超过限制，继续处理请求
-                service.call(req).await
-            }
-        })
-    }
+async fn metrics_endpoint() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/plain; version=0.0.4; charset=utf-8")
+        .body(metrics::render_text())
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    dotenv().ok();
-    
-    // 初始化tracing订阅者
-    fmt::init();
-    
-    // 创建HTTP客户端实例（带连接池）
-    let http_client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .tcp_keepalive(Duration::from_secs(60))
-        .build()
-        .expect("Failed to create HTTP client");
-    let shared_http_client = Arc::new(http_client);
-    
-    // 创建缓存实例
-    let cache = models::cache::PredictionCache::new(CACHE_MAX_SIZE, CACHE_TTL_SECONDS);
-    let shared_cache = models::cache::SharedCache::new(Mutex::new(cache));
-    
+    let _ = dotenvy::dotenv();
+    init_tracing();
+
+    let pool = db::pool::init_pool()
+        .await
+        .expect("failed to initialize database");
+    db::pool::set_pool(pool);
+
+    let cfg = get_config();
+    let bind = cfg.bind_addr.clone();
+    let http_client = build_http_client();
+
+    tracing::info!("Starting AI Novel Writing API on {}", bind);
+
     HttpServer::new(move || {
+        let openapi = ApiDoc::openapi();
         App::new()
             .wrap(TracingLogger::default())
-            .wrap(
-                Cors::permissive()
+            .wrap(actix_web::middleware::from_fn(request_id_fn)) // 注入 request_id 到 span + extensions + 响应头
+            .wrap(AuthMiddleware)
+            .wrap(DefaultHeaders::new().add(("X-Service", "novel-ai")))
+            .wrap(Cors::permissive())
+            .app_data(web::Data::new(http_client.clone()))
+            .app_data(web::JsonConfig::default().limit(1024 * 1024))
+            .service(
+                SwaggerUi::new("/docs/{_:.*}")
+                    .url("/api-docs/openapi.json", openapi),
             )
-            .wrap(RateLimiter::new())
-            .app_data(web::Data::new(shared_cache.clone()))
-            .app_data(web::Data::new(shared_http_client.clone()))
-            .service(api::routes::predict)
-            .service(api::routes::health_check)
-            .service(api::configure_swagger())
+            .route("/api-docs/openapi.json", web::get().to(serve_openapi))
+            .route("/metrics", web::get().to(metrics_endpoint))
+            .configure(handlers::health::configure)
+            .configure(handlers::auth::configure)
+            .configure(handlers::projects::configure)
+            .configure(handlers::novels::configure)
+            .configure(handlers::chapters::configure)
+            .configure(handlers::characters::configure)
+            .configure(handlers::outlines::configure)
+            .configure(handlers::generation::configure)
     })
-    .bind("127.0.0.1:8080")?
+    .bind(&bind)?
     .run()
     .await
 }

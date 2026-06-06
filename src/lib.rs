@@ -1,3 +1,13 @@
-pub mod api;
-pub mod models;
+pub mod auth;
 pub mod config;
+pub mod db;
+pub mod error;
+pub mod handlers;
+pub mod middleware;
+pub mod models;
+pub mod observability;
+pub mod prompts;
+pub mod providers;
+pub mod repositories;
+pub mod services;
+pub mod sse;
